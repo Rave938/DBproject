@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>问卷统计</title><link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="container">
+  <div class="card row" style="justify-content:space-between;">
+    <h1 id="title" style="margin:0;">统计结果</h1>
+    <button class="ghost" onclick="location.href='/dashboard.html'">返回工作台</button>
+  </div>
+  <div class="card" style="background: var(--primary-light); border-color: #c7d2fe;">
+    <p id="summary" style="margin:0; font-weight: 500; color: var(--primary);"></p>
+  </div>
+  <div id="list"></div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+const surveyId = new URLSearchParams(location.search).get('id'); 
+if (!API.getToken()) location.href = '/'; 
+if (!surveyId) location.href = '/dashboard.html';
+
+function typeText(t) { return { single: '单选题', multiple: '多选题', text: '文本填空', number: '数字填空' }[t] || t; }
+
+(async function () {
+  try {
+    const results = await Promise.all([API.get('/api/surveys/' + surveyId), API.get('/api/surveys/' + surveyId + '/stats')]);
+    const survey = results[0].survey; 
+    const stats = results[1];
+    
+    document.getElementById('title').textContent = survey.title + ' · 统计';
+    document.getElementById('summary').textContent = `总答卷数：${stats.totalResponses}  |  题目数：${stats.questions.length}`;
+    
+    const list = document.getElementById('list');
+    stats.questions.forEach((q) => {
+      const card = document.createElement('div'); card.className = 'card';
+      card.innerHTML = `<h2>${q.title}</h2><p class="muted" style="margin-bottom:20px;">题型：${typeText(q.type)} | 作答人数：${q.answeredCount}</p>`;
+      
+      if (q.type === 'single' || q.type === 'multiple') {
+        q.options.forEach((o) => {
+          const wrap = document.createElement('div'); wrap.style.margin = '16px 0';
+          const top = document.createElement('div'); top.className = 'row'; top.style.justifyContent = 'space-between'; top.style.marginBottom = '6px';
+          
+          const s1 = document.createElement('span'); s1.textContent = o.label; s1.style.fontWeight = '500';
+          
+          const s2 = document.createElement('span'); s2.className = 'muted';
+          let userNames = '';
+          if (o.users && o.users.length > 0) userNames = '：' + o.users.map(u => u.username).join('、');
+          s2.textContent = `${o.count} 人（${o.percent}%）` + userNames;
+          
+          top.append(s1, s2);
+          const bar = document.createElement('div'); bar.className = 'bar';
+          const inner = document.createElement('i'); inner.style.width = o.percent + '%'; bar.appendChild(inner);
+          wrap.append(top, bar); card.appendChild(wrap);
+        });
+        if (q.type === 'multiple') { const p = document.createElement('p'); p.className = 'muted'; p.style.marginTop = '16px'; p.textContent = `平均每人选择 ${q.avgSelected} 项`; card.appendChild(p); }
+      } else if (q.type === 'text') {
+        if (!q.samples.length) card.innerHTML += '<p class="muted">暂无回答</p>';
+        else {
+          const ul = document.createElement('ul'); ul.style.paddingLeft = '20px'; ul.style.margin = '0';
+          q.samples.forEach((item) => { const li = document.createElement('li'); li.style.marginBottom = '8px'; li.innerHTML = `${item.text} <span class="muted" style="font-size:12px;">—— ${item.username}</span>`; ul.appendChild(li); }); 
+          card.appendChild(ul);
+          if (q.samplesTruncated) card.innerHTML += '<p class="muted" style="margin-top:10px;">（仅显示前 500 条）</p>';
+        }
+      } else if (q.type === 'number') {
+        const p = document.createElement('p'); 
+        if (q.avg == null) p.textContent = '暂无回答';
+        else p.innerHTML = `<b>平均值：</b>${q.avg} &nbsp;|&nbsp; <b>最小：</b>${q.min} &nbsp;|&nbsp; <b>最大：</b>${q.max}`;
+        card.appendChild(p);
+        
+        if (q.numbers && q.numbers.length > 0) {
+          const ul = document.createElement('ul'); ul.style.paddingLeft = '20px'; ul.style.marginTop = '16px'; ul.style.borderTop = '1px dashed var(--border)'; ul.style.paddingTop = '16px';
+          q.numbers.forEach(item => { const li = document.createElement('li'); li.style.marginBottom = '6px'; li.innerHTML = `<b>${item.number}</b> <span class="muted" style="font-size:12px;">—— ${item.username}</span>`; ul.appendChild(li); });
+          card.appendChild(ul);
+        }
+      }
+      list.appendChild(card);
+    });
+  } catch (e) { document.getElementById('title').textContent = e.message; }
+})();
+</script>
+</body></html>
