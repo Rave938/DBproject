@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>我的问卷 - 工作台</title><link rel="stylesheet" href="/css/style.css">
+<!-- 引入二维码生成库 -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  .navbar { background: #fff; padding: 16px 24px; box-shadow: var(--shadow-sm); display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
+  .nav-brand { font-size: 18px; font-weight: bold; color: var(--primary); text-decoration: none; }
+  .table-container { overflow-x: auto; }
+  .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 1000; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
+  .modal-overlay.active { opacity: 1; pointer-events: auto; }
+  .modal-content { background: #fff; padding: 32px; border-radius: 12px; text-align: center; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1); transform: scale(0.95); transition: transform 0.2s; }
+  .modal-overlay.active .modal-content { transform: scale(1); }
+  #qrcode-container { display: inline-block; margin: 20px 0; padding: 10px; background: #fff; border: 1px solid #eee; border-radius: 8px; }
+</style>
+</head>
+<body>
+<nav class="navbar">
+  <div class="row">
+    <!-- 新增题库入口 -->
+    <a href="/dashboard.html" class="nav-brand">📋 问卷系统</a>
+    <span style="color: #ccc;">|</span>
+    <a href="/bank.html" style="font-weight: bold; color: var(--primary); text-decoration: none;">📚 我的题库</a>
+  </div>
+  <div class="row">
+    <span id="who" class="muted"></span>
+    <button id="logout" class="ghost" style="padding: 6px 14px;">退出登录</button>
+  </div>
+</nav>
+
+<div class="container">
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px;">
+    <div class="card">
+      <h2>➕ 新建问卷</h2>
+      <form id="create-form" class="stack">
+        <input name="title" placeholder="请输入问卷标题" required style="font-weight: bold;">
+        <textarea name="description" rows="2" placeholder="补充问卷说明（选填）"></textarea>
+        <div class="row" style="font-size: 14px; color: var(--text-muted);">
+          <label><input type="checkbox" name="allowAnonymous" style="width:auto; margin-right:6px;"> 允许匿名填写</label>
+          <label><input type="checkbox" name="allowMultipleSubmissions" checked style="width:auto; margin-right:6px;"> 允许重复提交</label>
+        </div>
+        <div style="font-size: 14px; color: var(--text-muted);">
+          <label>截止时间：<input type="datetime-local" name="deadline" style="width: 200px; margin-left: 8px;"></label>
+        </div>
+        <button type="submit" style="margin-top: 8px;">立即创建</button>
+      </form>
+      <p id="msg" class="msg"></p>
+    </div>
+
+    <div class="card" style="background: var(--primary-light); border-color: #c7d2fe;">
+      <h2 style="color: var(--primary);">🔍 填写他人问卷</h2>
+      <p class="muted" style="margin-bottom: 16px;">如果你收到了别人分享的问卷链接，可以在此直接粘贴进入。</p>
+      <form id="fill-form" class="stack">
+        <input name="url" placeholder="粘贴问卷链接或短码..." required style="background: #fff; border-color: #c7d2fe;">
+        <button type="submit" style="background: var(--primary);">去填写</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>📊 我的问卷列表</h2>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>问卷标题</th><th>状态</th><th>题目数</th><th>答卷数</th><th style="text-align:right;">操作</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <p id="empty" class="muted hidden" style="text-align:center; padding: 20px;">还没有问卷，快在左侧创建一个吧！</p>
+  </div>
+</div>
+
+<div id="qr-modal" class="modal-overlay" onclick="closeQRCode(event)">
+  <div class="modal-content" onclick="event.stopPropagation()">
+    <h2 style="margin-top: 0;">扫码填写问卷</h2>
+    <p class="muted" id="qr-title" style="margin-bottom: 10px;"></p>
+    <div id="qrcode-container"></div>
+    <p class="muted" style="font-size: 12px;">请使用手机相机或微信扫码</p>
+    <button class="ghost" onclick="closeQRCode()" style="margin-top: 16px; width: 100%;">关闭</button>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+const msg = document.getElementById('msg');
+const showMsg = (t, ok) => { msg.textContent = t; msg.className = 'msg' + (ok ? ' ok' : ''); };
+if (!API.getToken()) location.href = '/';
+
+(async function init() {
+  try { const { user } = await API.get('/api/auth/me'); document.getElementById('who').textContent = user.username; } catch { API.setToken(null); location.href = '/'; }
+  loadList();
+})();
+
+document.getElementById('logout').onclick = () => { API.setToken(null); location.href = '/'; };
+
+document.getElementById('fill-form').onsubmit = (e) => {
+  e.preventDefault();
+  let inputUrl = e.target.url.value.trim();
+  if (!inputUrl) return;
+  let publicId = inputUrl;
+  if (inputUrl.includes('/survey/')) publicId = inputUrl.split('/survey/')[1].split('?')[0].split('/')[0];
+  else if (inputUrl.startsWith('http://') || inputUrl.startsWith('https://')) { const parts = inputUrl.split('/'); publicId = parts[parts.length - 1]; }
+  if (!publicId) return alert('链接格式不正确，请检查');
+  location.href = '/survey/' + publicId;
+};
+
+document.getElementById('create-form').onsubmit = async (e) => {
+  e.preventDefault(); const f = e.target;
+  try {
+    const r = await API.post('/api/surveys', {
+      title: f.title.value, description: f.description.value, allowAnonymous: f.allowAnonymous.checked,
+      allowMultipleSubmissions: f.allowMultipleSubmissions.checked, deadline: f.deadline.value ? new Date(f.deadline.value).toISOString() : null,
+    });
+    location.href = '/editor.html?id=' + r.survey.id;
+  } catch (err) { showMsg(err.message); }
+};
+
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(() => alert('已复制链接：\n' + text)).catch(() => fallbackCopy(text));
+  } else { fallbackCopy(text); }
+}
+function fallbackCopy(text) {
+  const textArea = document.createElement("textarea");
+  textArea.value = text; textArea.style.position = "absolute"; textArea.style.left = "-999999px";
+  document.body.appendChild(textArea); textArea.select();
+  try { document.execCommand('copy'); alert('已复制链接：\n' + text); } catch (err) { prompt('复制失败，请手动复制以下链接：', text); }
+  textArea.remove();
+}
+
+let qrcodeObj = null;
+function showQRCode(title, url) {
+  document.getElementById('qr-title').textContent = title;
+  const container = document.getElementById('qrcode-container'); container.innerHTML = ''; 
+  qrcodeObj = new QRCode(container, { text: url, width: 200, height: 200, colorDark : "#1e293b", colorLight : "#ffffff", correctLevel : QRCode.CorrectLevel.H });
+  document.getElementById('qr-modal').classList.add('active');
+}
+function closeQRCode(e) {
+  if (e && e.target !== e.currentTarget && e.type === 'click') return;
+  document.getElementById('qr-modal').classList.remove('active');
+}
+
+const STATUS_TEXT = { draft: '草稿', published: '已发布', closed: '已关闭' };
+async function loadList() {
+  const { surveys } = await API.get('/api/surveys');
+  const tbody = document.getElementById('tbody'); tbody.innerHTML = '';
+  document.getElementById('empty').classList.toggle('hidden', surveys.length > 0);
+  
+  for (const s of surveys) {
+    const tr = document.createElement('tr');
+    const fillUrl = window.location.origin + '/survey/' + s.publicId;
+    tr.innerHTML = `<td style="font-weight:500;">${s.title}</td><td><span class="tag ${s.status}">${STATUS_TEXT[s.status] || s.status}</span></td><td>${s.questionCount}</td><td>${s.responseCount}</td>`;
+    const actions = document.createElement('td'); actions.className = 'row'; actions.style.justifyContent = 'flex-end';
+    
+    const aStats = document.createElement('button'); aStats.className = 'ghost'; aStats.textContent = '统计'; aStats.onclick = () => (location.href = '/stats.html?id=' + s.id);
+    const aEdit = document.createElement('button'); aEdit.className = 'ghost'; aEdit.textContent = '编辑'; aEdit.onclick = () => (location.href = '/editor.html?id=' + s.id);
+    const aCopy = document.createElement('button'); aCopy.className = 'ghost'; aCopy.textContent = '复制链接'; aCopy.onclick = () => copyText(fillUrl);
+    const aQR = document.createElement('button'); aQR.className = 'ghost'; aQR.textContent = '二维码'; aQR.onclick = () => showQRCode(s.title, fillUrl);
+    actions.append(aStats, aEdit, aCopy, aQR);
+    
+    if (s.status === 'draft') {
+      const b = document.createElement('button'); b.textContent = '发布'; b.onclick = async () => { try { await API.post('/api/surveys/' + s.id + '/publish'); loadList(); } catch (e) { const d = e.data && e.data.details; alert(d ? d.join('\n') : e.message); } };
+      actions.append(b);
+    }
+    tr.appendChild(actions);
+    tbody.appendChild(tr);
+  }
+}
+</script>
+</body></html>

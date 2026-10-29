@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>我的题库 - 问卷系统</title><link rel="stylesheet" href="/css/style.css">
+<!-- 引入 Chart.js 图表库 -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  .navbar { background: #fff; padding: 16px 24px; box-shadow: var(--shadow-sm); display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
+  .nav-brand { font-size: 18px; font-weight: bold; color: var(--primary); text-decoration: none; }
+  .q-card { display: flex; flex-direction: column; justify-content: space-between; padding: 20px; margin-bottom: 16px; border: 1px solid var(--border); border-radius: 12px; background: #fff; }
+  .q-title { font-size: 16px; font-weight: 600; margin-bottom: 8px; color: #0f172a; }
+  .q-meta { font-size: 12px; color: var(--text-muted); margin-bottom: 12px; display: flex; gap: 12px; align-items: center; }
+  .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: none; justify-content: center; align-items: center; z-index: 1000; }
+  .modal-overlay.active { display: flex; }
+  .modal-content { background: #fff; padding: 24px; border-radius: 12px; width: 100%; max-width: 650px; max-height: 85vh; overflow-y: auto; }
+  
+  /* 单卷统计卡片样式 */
+  .usage-card { border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; background: #f8fafc; display: flex; gap: 20px; align-items: center; }
+  .usage-info { flex: 1; }
+  .usage-title { font-weight: 600; font-size: 15px; margin-bottom: 6px; color: #1e293b; }
+  .chart-container { width: 140px; height: 140px; position: relative; flex-shrink: 0; display: flex; justify-content: center; align-items: center; }
+</style>
+</head>
+<body>
+<nav class="navbar">
+  <div class="row">
+    <a href="/dashboard.html" class="nav-brand">📋 问卷系统</a>
+    <span style="color: #ccc;">|</span>
+    <a href="/bank.html" style="font-weight: bold; color: var(--primary); text-decoration: none;">📚 我的题库</a>
+  </div>
+  <div class="row">
+    <span id="who" class="muted"></span>
+    <button id="logout" class="ghost" style="padding: 6px 14px;">退出登录</button>
+  </div>
+</nav>
+
+<div class="container">
+  <div class="card">
+    <h2>➕ 新建题目入库</h2>
+    <form id="create-form" class="stack">
+      <div class="row">
+        <select name="type" id="type-select" style="width:150px;">
+          <option value="single">单选题</option><option value="multiple">多选题</option>
+          <option value="text">文本填空</option><option value="number">数字填空</option>
+        </select>
+        <label><input type="checkbox" name="required" style="width:auto; margin-right:6px;"> 必答</label>
+      </div>
+      <input name="title" placeholder="请输入题目标题" required>
+      <div id="sec-choice">
+        <textarea name="options" rows="3" placeholder="选项，每行一个"></textarea>
+        <div class="row" style="margin-top:10px;"><label>最少选 <input name="minSelect" type="number" style="width:80px; display:inline-block;" min="1"></label><label>最多选 <input name="maxSelect" type="number" style="width:80px; display:inline-block;" min="1"></label></div>
+      </div>
+      <div id="sec-text" class="hidden"><div class="row"><label>最少字数 <input name="minLength" type="number" style="width:100px; display:inline-block;" min="0"></label><label>最多字数 <input name="maxLength" type="number" style="width:100px; display:inline-block;" min="0"></label></div></div>
+      <div id="sec-number" class="hidden"><div class="row"><label>最小值 <input name="min" type="number" style="width:110px; display:inline-block;"></label><label>最大值 <input name="max" type="number" style="width:110px; display:inline-block;"></label><label><input type="checkbox" name="integerOnly" style="width:auto; margin-right:6px;"> 必须为整数</label></div></div>
+      <button type="submit" style="width:120px;">保存到题库</button>
+    </form>
+    <p id="msg" class="msg"></p>
+  </div>
+
+  <div class="card">
+    <h2>📚 题目列表</h2>
+    <div id="question-list"></div>
+  </div>
+</div>
+
+<div id="info-modal" class="modal-overlay" onclick="closeModal(event)">
+  <div class="modal-content" onclick="event.stopPropagation()">
+    <h2 id="modal-title">详情</h2>
+    <div id="modal-body"></div>
+    <button class="ghost" onclick="closeModal()" style="width:100%; margin-top:20px;">关闭</button>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+const msg = document.getElementById('msg');
+const showMsg = (t, ok) => { msg.textContent = t; msg.className = 'msg' + (ok ? ' ok' : ''); };
+if (!API.getToken()) location.href = '/';
+
+let currentUserId = null;
+let chartInstances = []; // 用于存储图表实例，关闭时销毁
+
+(async function init() {
+  try { 
+    const { user } = await API.get('/api/auth/me'); 
+    document.getElementById('who').textContent = user.username; 
+    currentUserId = user.id;
+  } catch { API.setToken(null); location.href = '/'; }
+  loadQuestions();
+})();
+
+document.getElementById('logout').onclick = () => { API.setToken(null); location.href = '/'; };
+document.getElementById('type-select').onchange = (e) => {
+  const t = e.target.value;
+  document.getElementById('sec-choice').classList.toggle('hidden', !(t === 'single' || t === 'multiple'));
+  document.getElementById('sec-text').classList.toggle('hidden', t !== 'text');
+  document.getElementById('sec-number').classList.toggle('hidden', t !== 'number');
+};
+
+document.getElementById('create-form').onsubmit = async (e) => {
+  e.preventDefault(); const f = e.target; const type = f.type.value;
+  const payload = { type, title: f.title.value, required: f.required.checked };
+  if (type === 'single' || type === 'multiple') {
+    payload.options = f.options.value.split('\n').map((s) => s.trim()).filter(Boolean);
+    payload.minSelect = f.minSelect.value ? Number(f.minSelect.value) : null;
+    payload.maxSelect = f.maxSelect.value ? Number(f.maxSelect.value) : null;
+  } else if (type === 'text') {
+    payload.minLength = f.minLength.value ? Number(f.minLength.value) : null;
+    payload.maxLength = f.maxLength.value ? Number(f.maxLength.value) : null;
+  } else if (type === 'number') {
+    payload.min = f.min.value !== '' ? Number(f.min.value) : null;
+    payload.max = f.max.value !== '' ? Number(f.max.value) : null;
+    payload.integerOnly = f.integerOnly.checked;
+  }
+  try {
+    await API.post('/api/questions', payload);
+    f.reset(); document.getElementById('type-select').dispatchEvent(new Event('change'));
+    showMsg('添加成功', true); loadQuestions();
+  } catch (err) { showMsg(err.message); }
+};
+
+async function loadQuestions() {
+  const { questions } = await API.get('/api/questions');
+  const list = document.getElementById('question-list'); list.innerHTML = '';
+  if (!questions.length) { list.innerHTML = '<p class="muted">题库为空，先在上方创建一个吧。</p>'; return; }
+
+  questions.forEach(q => {
+    const isOwn = q.creatorId === currentUserId;
+    const div = document.createElement('div'); div.className = 'q-card';
+    
+    let tags = '';
+    if (!isOwn && q.isShared) tags += `<span class="tag" style="background:#e0e7ff; color:#4338ca; margin-left:8px;">由 ${q.creatorName} 共享</span>`;
+    else if (isOwn && q.isShared) tags += `<span class="tag published" style="margin-left:8px;">已共享</span>`;
+
+    div.innerHTML = `<div><div class="q-title">[v${q.version}] ${q.title} ${tags}</div><div class="q-meta">题型：${q.type} | 血缘ID：${q.lineageId.slice(0,8)}...</div></div>`;
+    
+    const actions = document.createElement('div'); actions.className = 'row';
+    const btnVersion = document.createElement('button'); btnVersion.className = 'ghost'; btnVersion.textContent = '生成新版本';
+    btnVersion.onclick = () => createNewVersion(q);
+    const btnHistory = document.createElement('button'); btnHistory.className = 'ghost'; btnHistory.textContent = '历史版本';
+    btnHistory.onclick = () => showHistory(q.lineageId);
+    actions.append(btnVersion, btnHistory);
+
+    if (isOwn) {
+      const btnShare = document.createElement('button'); btnShare.className = 'ghost'; btnShare.textContent = q.isShared ? '取消共享' : '共享给他人';
+      btnShare.onclick = async () => { await API.post('/api/questions/' + q._id + '/share'); loadQuestions(); };
+      const btnDetails = document.createElement('button'); btnDetails.className = 'ghost'; btnDetails.textContent = '数据与引用';
+      btnDetails.onclick = () => showDetails(q._id);
+      actions.append(btnShare, btnDetails);
+    }
+    div.appendChild(actions); list.appendChild(div);
+  });
+}
+
+async function createNewVersion(oldQ) {
+  const newTitle = prompt('请输入新版本标题（留空则不修改）：', oldQ.title);
+  if (newTitle === null) return;
+  try { await API.post('/api/questions/' + oldQ._id + '/new-version', { title: newTitle }); alert('新版本创建成功！'); loadQuestions(); } 
+  catch (e) { alert(e.message); }
+}
+
+async function showHistory(lineageId) {
+  const all = await API.get('/api/questions');
+  const history = all.questions.filter(q => q.lineageId === lineageId).sort((a,b)=>a.version-b.version);
+  document.getElementById('modal-title').textContent = '版本演进历史';
+  document.getElementById('modal-body').innerHTML = '<ul style="padding-left:20px; line-height:1.8;">' + history.map(q => `<li><b>v${q.version}</b> - ${q.title} <span class="muted">(${q.creatorName})</span></li>`).join('') + '</ul>';
+  document.getElementById('info-modal').classList.add('active');
+}
+
+// 展示详情弹窗
+async function showDetails(id) {
+  try {
+    const data = await API.get('/api/questions/' + id + '/details');
+    document.getElementById('modal-title').textContent = '数据与引用情况';
+    chartInstances.forEach(c => c.destroy());
+    chartInstances = [];
+
+    let html = `<h3 style="margin-top:0;">📌 被以下问卷引用</h3>`;
+    
+    if (data.usages.length === 0) {
+      html += `<p class="muted">暂无问卷引用该题目。</p>`;
+    } else {
+      data.usages.forEach((s, index) => {
+        const st = s.status === 'published' ? '已发布' : (s.status === 'closed' ? '已关闭' : '草稿');
+        html += `<div class="usage-card">
+                   <div class="usage-info">
+                     <div class="usage-title">${s.title} <span class="tag ${s.status}" style="margin-left:8px;">${st}</span></div>
+                     <div class="muted">发布者：${s.ownerName}</div>
+                   </div>`;
+        
+        // 如果是选择题且有数据，预留 canvas 画饼图
+        if (s.stats && s.stats.length > 0) {
+          html += `<div class="chart-container"><canvas id="chart-${index}"></canvas></div>`;
+        } else if (s.stats) {
+          html += `<div class="muted" style="font-size:12px;">暂无答卷数据</div>`;
+        }
+        html += `</div>`;
+      });
+    }
+
+    // 跨卷总体统计
+    if (data.type === 'single' || data.type === 'multiple') {
+      html += `<hr style="border:0; border-top:1px solid var(--border); margin: 24px 0;">`;
+      html += `<h3>📊 所有问卷累计统计（共 ${data.totalAnswers} 份作答）</h3>`;
+      if (data.totalAnswers === 0) {
+        html += `<p class="muted">暂无作答数据。</p>`;
+      } else {
+        data.overallStats.forEach(x => {
+          html += `<div style="display:flex; justify-content:space-between; padding:10px 0; border-bottom:1px dashed var(--border);">
+                     <span>${x.label}</span><b>${x.count} 次 (${x.percent}%)</b>
+                   </div>`;
+        });
+      }
+    }
+
+    document.getElementById('modal-body').innerHTML = html;
+    document.getElementById('info-modal').classList.add('active');
+
+    // 延迟一点等 DOM 渲染完再画图
+    setTimeout(() => {
+      data.usages.forEach((s, index) => {
+        if (s.stats && s.stats.length > 0) {
+          renderPieChart(`chart-${index}`, s.stats);
+        }
+      });
+    }, 50);
+
+  } catch (e) { alert(e.message); }
+}
+
+// 绘制饼状图函数
+function renderPieChart(canvasId, stats) {
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  const labels = stats.map(x => x.label);
+  const data = stats.map(x => x.count);
+  // 预设好看的柔和色彩
+  const bgColors = ['#4f46e5', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
+
+  const chart = new Chart(ctx, {
+    type: 'doughnut', // 环形图比纯饼图更现代
+    data: {
+      labels: labels,
+      datasets: [{
+        data: data,
+        backgroundColor: bgColors,
+        borderWidth: 0,
+        hoverOffset: 4
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false }, // 隐藏图例，节省空间，鼠标悬浮可看
+        tooltip: {
+          callbacks: {
+            label: function(context) {
+              let label = context.label || '';
+              let value = context.raw || 0;
+              let total = context.dataset.data.reduce((a, b) => a + b, 0);
+              let percentage = Math.round((value / total) * 100) + '%';
+              return ` ${label}: ${value} 次 (${percentage})`;
+            }
+          }
+        }
+      },
+      cutout: '65%' // 环形图的厚度
+    }
+  });
+  chartInstances.push(chart);
+}
+
+function closeModal(e) {
+  if (e && e.target !== e.currentTarget) return;
+  document.getElementById('info-modal').classList.remove('active');
+  chartInstances.forEach(c => c.destroy()); // 关闭时销毁图表实例，防止内存泄漏
+  chartInstances = [];
+}
+</script>
+</body></html>

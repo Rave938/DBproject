@@ -1,0 +1,31 @@
+const test = require('node:test');
+const assert = require('node:assert');
+const { validateAnswer, evaluateCondition, resolveNext, walkSurvey, findJumpCycle } = require('../src/services/logic');
+
+const single = (o = {}) => Object.assign({ qid: 'q1', order: 1, type: 'single', title: '你的性别', required: true, options: [{ oid: 'o1', label: '男' }, { oid: 'o2', label: '女' }, { oid: 'o3', label: '其他' }], jumpRules: [] }, o);
+const multiple = (o = {}) => Object.assign({ qid: 'q2', order: 2, type: 'multiple', title: '你喜欢的水果', required: true, minSelect: 2, maxSelect: 3, options: ['苹果', '香蕉', '西瓜', '葡萄'].map((l, i) => ({ oid: 'o' + (i + 1), label: l })), jumpRules: [] }, o);
+const text = (o = {}) => Object.assign({ qid: 'q3', order: 3, type: 'text', title: '你的名字', required: false, minLength: 2, maxLength: 10, jumpRules: [] }, o);
+const num = (o = {}) => Object.assign({ qid: 'q4', order: 4, type: 'number', title: '年龄', required: true, min: 0, max: 120, integerOnly: true, jumpRules: [] }, o);
+
+test('U-01 单选必答未作答应报错', () => { const r = validateAnswer(single(), ''); assert.strictEqual(r.ok, false); assert.match(r.errors[0].message, /必答/); });
+test('U-02 单选选项不存在应报错', () => { assert.strictEqual(validateAnswer(single(), 'o9').ok, false); });
+test('U-03 单选正常作答', () => { const r = validateAnswer(single(), 'o2'); assert.strictEqual(r.ok, true); assert.deepStrictEqual(r.normalized, { optionIds: ['o2'] }); });
+test('U-04 多选少于最少选择数应报错', () => { const r = validateAnswer(multiple(), ['o1']); assert.strictEqual(r.ok, false); assert.match(r.errors[0].message, /至少选择 2 项/); });
+test('U-05 多选多于最多选择数应报错', () => { const r = validateAnswer(multiple(), ['o1', 'o2', 'o3', 'o4']); assert.strictEqual(r.ok, false); assert.match(r.errors[0].message, /最多选择 3 项/); });
+test('U-06 多选合法作答并通过去重', () => { const r = validateAnswer(multiple(), ['o1', 'o2', 'o1']); assert.strictEqual(r.ok, true); assert.deepStrictEqual(r.normalized.optionIds.slice().sort(), ['o1', 'o2']); });
+test('U-07 文本少于最少字数应报错', () => { assert.strictEqual(validateAnswer(text(), 'a').ok, false); });
+test('U-08 文本超过最多字数应报错', () => { assert.strictEqual(validateAnswer(text(), 'a'.repeat(20)).ok, false); });
+test('U-09 非必答文本留空应通过', () => { const r = validateAnswer(text(), ''); assert.strictEqual(r.ok, true); assert.strictEqual(r.hasValue, false); });
+test('U-10 数字非数字应报错', () => { assert.strictEqual(validateAnswer(num(), 'abc').ok, false); });
+test('U-11 数字非整数应报错', () => { const r = validateAnswer(num(), '20.5'); assert.strictEqual(r.ok, false); assert.match(r.errors[0].message, /整数/); });
+test('U-12 数字超出范围应报错', () => { assert.strictEqual(validateAnswer(num(), '200').ok, false); assert.strictEqual(validateAnswer(num(), '-1').ok, false); });
+test('U-13 数字合法作答', () => { const r = validateAnswer(num(), '30'); assert.strictEqual(r.ok, true); assert.strictEqual(r.normalized.number, 30); });
+test('U-14 选项条件命中', () => { assert.strictEqual(evaluateCondition({ kind: 'option', oid: 'o1' }, { optionIds: ['o1'] }), true); });
+test('U-15 选项条件未命中', () => { assert.strictEqual(evaluateCondition({ kind: 'option', oid: 'o9' }, { optionIds: ['o1'] }), false); });
+test('U-16 数值条件各运算符', () => { const a = { number: 20 }; assert.strictEqual(evaluateCondition({ kind: 'number', op: 'gt', value: 10 }, a), true); assert.strictEqual(evaluateCondition({ kind: 'number', op: 'lt', value: 10 }, a), false); assert.strictEqual(evaluateCondition({ kind: 'number', op: 'eq', value: 20 }, a), true); assert.strictEqual(evaluateCondition({ kind: 'number', op: 'between', value: 18, value2: 25 }, a), true); });
+test('U-17 单选题选 A 跳到第 3 题', () => { const qs = [single({ qid: 'q1', order: 1, jumpRules: [{ condition: { kind: 'option', oid: 'o1' }, targetQid: 'q3' }] }), multiple({ qid: 'q2', order: 2 }), text({ qid: 'q3', order: 3 })]; const r = walkSurvey(qs, { q1: 'o1', q3: 'ok' }); assert.deepStrictEqual(r.visited, ['q1', 'q3']); assert.strictEqual(r.errors.length, 0); });
+test('U-18 未命中规则则顺序进入下一题', () => { const qs = [single({ qid: 'q1', order: 1, jumpRules: [{ condition: { kind: 'option', oid: 'o1' }, targetQid: 'q3' }] }), text({ qid: 'q2', order: 2, required: false }), text({ qid: 'q3', order: 3, required: false })]; const r = walkSurvey(qs, { q1: 'o2' }); assert.deepStrictEqual(r.visited, ['q1', 'q2', 'q3']); });
+test('U-19 数字条件跳转到结束', () => { const qs = [num({ qid: 'q1', order: 1, jumpRules: [{ condition: { kind: 'number', op: 'lt', value: 18 }, targetQid: '__END__' }] }), text({ qid: 'q2', order: 2, required: false })]; const r = walkSurvey(qs, { q1: 10 }); assert.deepStrictEqual(r.visited, ['q1']); });
+test('U-20 跳转目标题目不存在时报错', () => { const qs = [single({ qid: 'q1', order: 1, jumpRules: [{ condition: { kind: 'option', oid: 'o1' }, targetQid: 'qX' }] })]; const r = walkSurvey(qs, { q1: 'o1' }); assert.ok(r.errors.some((e) => /不存在/.test(e.message))); });
+test('U-21 环路应被检测出来', () => { const qs = [single({ qid: 'q1', order: 1, jumpRules: [{ condition: { kind: 'option', oid: 'o1' }, targetQid: 'q2' }] }), single({ qid: 'q2', order: 2, jumpRules: [{ condition: { kind: 'option', oid: 'o1' }, targetQid: 'q1' }] })]; const cycle = findJumpCycle(qs); assert.ok(cycle && cycle.length > 0); });
+test('U-22 路径外的答案会被忽略', () => { const qs = [single({ qid: 'q1', order: 1, jumpRules: [{ condition: { kind: 'option', oid: 'o1' }, targetQid: 'q3' }] }), text({ qid: 'q2', order: 2 }), text({ qid: 'q3', order: 3, required: false })]; const r = walkSurvey(qs, { q1: 'o1', q2: '不该存在的回答' }); assert.deepStrictEqual(r.visited, ['q1', 'q3']); assert.deepStrictEqual(r.ignoredAnswers, ['q2']); });

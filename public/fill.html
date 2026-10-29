@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>填写问卷</title><link rel="stylesheet" href="/css/style.css">
+<style>
+  body { background: #eff6ff; }
+  .fill-container { max-width: 680px; margin: 40px auto; padding: 0 20px; }
+  .question-title { font-size: 20px; font-weight: 600; margin-bottom: 24px; color: #0f172a; }
+</style>
+</head>
+<body>
+<div class="fill-container">
+  <div class="card" style="text-align: center; border-top: 4px solid var(--primary);">
+    <h1 id="s-title" style="margin-bottom: 8px;">加载中...</h1>
+    <p id="s-desc" class="muted" style="margin: 0;"></p>
+  </div>
+
+  <!-- 匿名选项卡片（只有登录且问卷允许匿名时才显示） -->
+  <div id="anon-option-card" class="card hidden" style="padding: 16px 24px; background: #fffbeb; border-color: #fde68a;">
+    <label style="cursor: pointer; display: flex; align-items: center; font-size: 15px; color: #92400e;">
+      <input type="checkbox" id="anonymous-checkbox" style="width: 18px; height: 18px; margin-right: 12px; accent-color: #d97706;">
+      <b>匿名提交</b>&nbsp;（勾选后，将不记录您的用户名，仅统计结果）
+    </label>
+  </div>
+  
+  <div id="login-tip" class="card hidden" style="text-align:center; padding: 40px 20px;">
+    <h2>🔒 需要登录</h2>
+    <p class="muted" style="margin-bottom: 20px;">该问卷要求登录后才能填写</p>
+    <button onclick="location.href='/?redirect=' + encodeURIComponent(location.pathname)">去登录并继续</button>
+  </div>
+
+  <div id="q-card" class="card hidden">
+    <p id="progress" class="muted" style="margin-bottom: 16px; font-weight: 500;"></p>
+    <div class="question-title" id="q-title"></div>
+    <div id="q-body"></div>
+    <p id="q-msg" class="msg"></p>
+    <div style="margin-top: 32px; text-align: right;">
+      <button id="btn-next" style="padding: 12px 32px; font-size: 16px;">下一题</button>
+    </div>
+  </div>
+  
+  <div id="done-card" class="card hidden" style="text-align: center;">
+    <h2>✅ 填写完成</h2>
+    <p class="muted" id="done-path"></p>
+    <button id="btn-submit" style="padding: 12px 32px; font-size: 16px; margin-top: 20px;">提交问卷</button>
+    <p id="done-msg" class="msg"></p>
+  </div>
+  
+  <div id="success-card" class="card hidden" style="text-align: center; padding: 60px 20px;">
+    <h1 style="color: var(--success);">🎉 提交成功</h1>
+    <p class="muted" style="margin: 16px 0 32px;">感谢你的填写，你的回答已被系统记录。</p>
+    <button onclick="location.href='/dashboard.html'" class="ghost">返回工作台</button>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+  // === 变量声明区（只保留这一处） ===
+  const publicId = location.pathname.split('/').filter(Boolean).pop(); 
+  const answers = {}; 
+  let survey = null; 
+  let currentQid = null; 
+  let visitedOrder = []; 
+  const $ = (id) => document.getElementById(id);
+
+  // === 初始化加载 ===
+  (async function init() {
+    try {
+      const r = await API.get('/api/public/surveys/' + publicId); 
+      survey = r.survey;
+      $('s-title').textContent = survey.title; 
+      $('s-desc').textContent = survey.description || '';
+      
+      if (survey.status !== 'published') { 
+        $('s-title').textContent = survey.title + '（当前不可填写）'; 
+        return; 
+      }
+      if (r.requiresLogin && !r.loggedIn) { 
+        $('login-tip').classList.remove('hidden'); 
+        return; 
+      }
+      
+      // 如果用户已登录，且问卷允许匿名，则显示“匿名提交”选项
+      if (r.loggedIn && survey.allowAnonymous) {
+        $('anon-option-card').classList.remove('hidden');
+      }
+
+      if (!survey.questions.length) { 
+        $('s-title').textContent = '问卷还没有题目'; 
+        return; 
+      }
+      currentQid = survey.questions[0].qid; 
+      renderQuestion(); 
+      $('q-card').classList.remove('hidden');
+    } catch (e) { 
+      $('s-title').textContent = e.message; 
+    }
+  })();
+
+  // === 渲染题目逻辑 ===
+  function getQuestion(qid) { 
+    return survey.questions.find((q) => q.qid === qid); 
+  }
+
+  function renderQuestion() {
+    const q = getQuestion(currentQid); 
+    $('q-body').innerHTML = '';
+    if (visitedOrder.indexOf(q.qid) < 0) visitedOrder.push(q.qid);
+    
+    $('progress').innerHTML = `第 ${visitedOrder.length} 题 ${q.required ? '<span style="color:var(--danger)">*必答</span>' : '<span class="muted">(选填)</span>'}`;
+    $('q-title').textContent = q.title;
+
+    const body = $('q-body');
+    
+    if (q.type === 'single' || q.type === 'multiple') {
+      (q.options || []).forEach((o) => {
+        const line = document.createElement('div'); line.className = 'option-line';
+        const input = document.createElement('input'); input.type = q.type === 'single' ? 'radio' : 'checkbox'; input.name = 'opt'; input.value = o.oid;
+        const prev = answers[q.qid]; 
+        if (q.type === 'single' && prev === o.oid) input.checked = true; 
+        if (q.type === 'multiple' && Array.isArray(prev) && prev.indexOf(o.oid) >= 0) input.checked = true;
+        const label = document.createElement('label'); label.textContent = o.label; 
+        
+        line.onclick = (e) => { if (e.target !== input) input.click(); };
+        if (input.checked) line.style.borderColor = 'var(--primary)';
+        input.onchange = () => {
+          if (q.type === 'single') {
+            document.querySelectorAll('.option-line').forEach(el => el.style.borderColor = 'var(--border)');
+            if (input.checked) line.style.borderColor = 'var(--primary)';
+          } else {
+            line.style.borderColor = input.checked ? 'var(--primary)' : 'var(--border)';
+          }
+        };
+        if (input.checked) line.style.borderColor = 'var(--primary)';
+        line.append(input, label); body.appendChild(line);
+      });
+      if (q.type === 'multiple') { 
+        const parts = []; if (q.minSelect != null) parts.push(`最少选 ${q.minSelect} 项`); if (q.maxSelect != null) parts.push(`最多选 ${q.maxSelect} 项`);
+        if (parts.length) { const tip = document.createElement('p'); tip.className = 'muted'; tip.style.marginTop = '12px'; tip.textContent = parts.join('，'); body.appendChild(tip); }
+      }
+    } else if (q.type === 'text') {
+      const ta = document.createElement('textarea'); ta.rows = 4; ta.id = 'answer-input'; ta.value = answers[q.qid] || ''; ta.style.fontSize = '16px'; body.appendChild(ta);
+      const parts = []; if (q.minLength != null) parts.push(`最少 ${q.minLength} 字`); if (q.maxLength != null) parts.push(`最多 ${q.maxLength} 字`);
+      if (parts.length) { const tip = document.createElement('p'); tip.className = 'muted'; tip.style.marginTop = '8px'; tip.textContent = parts.join('，'); body.appendChild(tip); }
+    } else if (q.type === 'number') {
+      const inp = document.createElement('input'); inp.type = 'number'; inp.id = 'answer-input'; inp.value = answers[q.qid] != null ? answers[q.qid] : ''; inp.style.fontSize = '18px'; inp.style.padding = '16px'; body.appendChild(inp);
+      const parts = []; if (q.min != null) parts.push(`最小 ${q.min}`); if (q.max != null) parts.push(`最大 ${q.max}`); if (q.integerOnly) parts.push('必须为整数');
+      if (parts.length) { const tip = document.createElement('p'); tip.className = 'muted'; tip.style.marginTop = '8px'; tip.textContent = parts.join('，'); body.appendChild(tip); }
+    }
+    $('q-msg').textContent = '';
+  }
+
+  function readCurrentValue() {
+    const q = getQuestion(currentQid);
+    if (q.type === 'single') { const el = document.querySelector('input[name="opt"]:checked'); return el ? el.value : ''; }
+    if (q.type === 'multiple') return Array.from(document.querySelectorAll('input[name="opt"]:checked')).map((x) => x.value);
+    const inp = $('answer-input'); if (!inp) return ''; if (q.type === 'number') return inp.value === '' ? '' : Number(inp.value); return inp.value;
+  }
+
+  $('btn-next').onclick = async () => {
+    const value = readCurrentValue(); $('q-msg').textContent = '';
+    try {
+      const r = await API.post('/api/public/surveys/' + publicId + '/validate-answer', { qid: currentQid, value }); answers[currentQid] = value;
+      if (r.nextQid) { currentQid = r.nextQid; renderQuestion(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+      else { $('q-card').classList.add('hidden'); $('done-card').classList.remove('hidden'); $('done-path').textContent = '作答路径：' + visitedOrder.join(' -> '); }
+    } catch (e) { $('q-msg').textContent = (e.data && e.data.errors && e.data.errors[0] && e.data.errors[0].message) || e.message; }
+  };
+
+  $('btn-submit').onclick = async () => {
+    $('done-msg').textContent = '';
+    // 获取用户是否勾选了匿名
+    const isAnonymous = $('anonymous-checkbox') ? $('anonymous-checkbox').checked : false;
+    
+    try { 
+      await API.post('/api/public/surveys/' + publicId + '/responses', { answers, isAnonymous }); 
+      $('done-card').classList.add('hidden'); 
+      $('success-card').classList.remove('hidden'); 
+    }
+    catch (e) { 
+      $('done-msg').textContent = (e.data && e.data.details && e.data.details[0] && e.data.details[0].message) || e.message; 
+    }
+  };
+</script>
+</body></html>
